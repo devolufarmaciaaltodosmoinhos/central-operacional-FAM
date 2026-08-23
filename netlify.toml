@@ -23,9 +23,12 @@
     X-Frame-Options = "DENY"
     Referrer-Policy = "strict-origin-when-cross-origin"
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
-    # Zero dependências de terceiros (sem CDN de fontes/ícones) -> CSP estrito.
-    # connect-src 'self' cobre também /api/data (mesma origem).
-    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; upgrade-insecure-requests"
+    # 'unsafe-inline' em script-src/style-src é necessário porque os serviços do
+    # tipo HTML (carregados pela farmácia) são abertos como blob: e HERDAM esta
+    # mesma CSP (blob: não tem resposta HTTP própria para enviar o seu próprio
+    # cabeçalho). Sem isto, qualquer <style>/<script> inline nesses documentos
+    # fica bloqueado e o documento aparece completamente desformatado.
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; upgrade-insecure-requests"
 
 # HTML — nunca em cache agressiva (garante que a próxima visita vê a versão mais recente)
 [[headers]]

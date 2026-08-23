@@ -27,12 +27,20 @@ describe("deveAdiarRenderizacao — REGRESSÃO: botões não devem bloquear o re
     assert.equal(deveAdiarRenderizacao(btn, container), false);
   });
 
-  test("NÃO adia quando o foco está num input de cor ou checkbox", () => {
+  test("NÃO adia quando o foco está num checkbox", () => {
+    const container = document.createElement("div");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    container.appendChild(checkbox);
+    assert.equal(deveAdiarRenderizacao(checkbox, container), false);
+  });
+
+  test("REGRESSÃO: adia quando o seletor de cor está focado (senão fecha-se sozinho a meio da escolha)", () => {
     const container = document.createElement("div");
     const colorInput = document.createElement("input");
     colorInput.type = "color";
     container.appendChild(colorInput);
-    assert.equal(deveAdiarRenderizacao(colorInput, container), false);
+    assert.equal(deveAdiarRenderizacao(colorInput, container), true);
   });
 
   test("NÃO adia quando o campo de texto focado está fora do container", () => {

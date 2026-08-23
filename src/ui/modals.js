@@ -239,7 +239,12 @@ export function initModals(el, store, actions) {
       sel.addEventListener("change", () => actions.atualizarCategoria(catId, { parentId: sel.value || null }));
     });
     el.categoriasLista.querySelectorAll("[data-cat-nome]").forEach(inp => inp.addEventListener("change", () => actions.atualizarCategoria(inp.dataset.catNome, { nome: inp.value.trim() || "Sem nome" })));
-    el.categoriasLista.querySelectorAll("[data-cat-color]").forEach(inp => inp.addEventListener("input", () => actions.atualizarCategoria(inp.dataset.catColor, { cor: inp.value })));
+    // 'change' (não 'input'): o seletor nativo de cor dispara "input" a cada
+    // movimento dentro da roda de cores. Se atualizássemos o estado nessa
+    // altura, a lista de categorias era reconstruída a meio da escolha e o
+    // seletor fechava sozinho — obrigando a reabri-lo várias vezes até
+    // acertar na cor. Com "change", só atualiza quando a escolha é finalizada.
+    el.categoriasLista.querySelectorAll("[data-cat-color]").forEach(inp => inp.addEventListener("change", () => actions.atualizarCategoria(inp.dataset.catColor, { cor: inp.value })));
     el.categoriasLista.querySelectorAll("[data-cat-del]").forEach(btn => btn.addEventListener("click", () => {
       if (confirm("Remover esta categoria? Os serviços ficam com 'Categoria Indefinida' e as subcategorias sobem de nível.")) actions.removerCategoria(btn.dataset.catDel);
     }));

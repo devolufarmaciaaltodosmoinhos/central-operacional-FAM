@@ -94,17 +94,26 @@ export function placeholderImg(nome) {
 
 /**
  * Decide se uma lista dentro de um painel deve ser reconstruída agora ou
- * adiada. Só adia quando o elemento focado é mesmo um campo de TEXTO livre
- * dentro desse container (perderia o cursor a meio da escrita) — um botão
- * focado (ex.: acabado de clicar em "editar" ou "eliminar") NÃO deve
- * bloquear a reconstrução, senão a ação parece não ter efeito nenhum.
+ * adiada. Só adia quando o elemento focado é um campo em que o utilizador
+ * está mesmo "a meio" de uma escolha — um campo de texto a ser escrito, ou
+ * um seletor de cor nativo aberto — porque reconstruir o DOM nesse momento
+ * interrompe a interação (perde o cursor, ou fecha o seletor de cor). Um
+ * botão focado (ex.: acabado de clicar em "editar"/"eliminar") NÃO conta,
+ * senão a ação parece não ter efeito nenhum.
  *
- * Bug real que isto corrige: eliminar uma categoria não fazia nada visível
- * porque o botão "eliminar", ainda focado depois do clique + confirm(),
- * era tratado como "utilizador a editar" e o refresh ficava bloqueado.
+ * Bugs reais que isto corrige:
+ *  1. Eliminar uma categoria não fazia nada visível porque o botão
+ *     "eliminar", ainda focado depois do clique + confirm(), era tratado
+ *     como "utilizador a editar" e o refresh ficava bloqueado.
+ *  2. O seletor de cor de categoria fechava-se sozinho a cada movimento
+ *     dentro da roda de cores (ver também a mudança de "input" para
+ *     "change" em modals.js — isto é uma proteção adicional para o caso
+ *     raro de uma sincronização em fundo terminar enquanto o seletor está
+ *     aberto mas ainda por confirmar).
  */
 export function deveAdiarRenderizacao(activeElement, container) {
-  if (!activeElement || !container) return false;
-  const isTextInput = activeElement.tagName === "INPUT" && (activeElement.type === "text" || activeElement.type === "");
-  return isTextInput && container.contains(activeElement);
+  if (!activeElement || !container || !container.contains(activeElement)) return false;
+  if (activeElement.tagName !== "INPUT") return false;
+  const tipo = activeElement.type;
+  return tipo === "text" || tipo === "" || tipo === "color";
 }
