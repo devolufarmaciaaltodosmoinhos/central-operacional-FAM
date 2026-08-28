@@ -9,7 +9,14 @@
  * (actions.js) não precise de saber de onde vêm os dados.
  */
 const API_URL = "/api/data";
+const ASSET_URL = (key) => `/api/asset/${encodeURIComponent(key)}`;
 const OLD_INDEXEDDB_NAME = "FarmaciaAltoMoinhosDB";
+
+// Cada pedaço fica bem abaixo do limite de 6MB por pedido das funções do
+// Netlify (mesmo com a margem do escape de JSON), para nunca ser recusado.
+const TAMANHO_PEDACO = 2 * 1024 * 1024;
+function metaKey(key) { return `${key}:meta`; }
+function partKey(key, i) { return `${key}:part:${i}`; }
 
 let cache = null;
 let cacheLoaded = false;
@@ -67,6 +74,108 @@ export function makeDataStore() {
     async refresh() {
       cacheLoaded = false;
       return ensureLoaded();
+    },
+
+    /**
+     * Conteúdos pesados individuais (o HTML completo de um serviço, por
+     * exemplo) vivem no seu próprio blob — nunca fazem parte do `putAll`
+     * principal, para que o pedido de gravação do estado geral se mantenha
+     * sempre pequeno e rápido, independentemente de quantos/quão grandes
+     * sejam os documentos já carregados.
+     *
+     * Sem limite de tamanho: ficheiros maiores do que o limite de 6MB por
+     * pedido das funções do Netlify são automaticamente divididos em
+     * pedaços mais pequenos (ver `guardarConteudoFragmentado`), cada um
+     * gravado no seu próprio blob e depois remontados na leitura. O
+     * utilizador nunca vê esta divisão — só o servidor, através das chaves
+     * "...:part:N" e "...:meta".
+     */
+    async getAsset(key) {
+      const res = await fetch(ASSET_URL(key), { headers: { Accept: "application/json" } });
+      if (res.ok) { const data = await res.json(); return data.content; }
+      if (res.status !== 404) {
+        const corpo = await res.json().catch(() => ({}));
+        throw new Error(corpo.error || `Não foi possível ler o conteúdo do servidor (HTTP ${res.status}).`);
+      }
+      // não existe no caminho "simples": pode estar guardado em pedaços
+      const metaRes = await fetch(ASSET_URL(metaKey(key)), { headers: { Accept: "application/json" } });
+      if (metaRes.status === 404) return null;
+      if (!metaRes.ok) {
+        const corpo = await metaRes.json().catch(() => ({}));
+        throw new Error(corpo.error || `Não foi possível ler o índice do conteúdo (HTTP ${metaRes.status}).`);
+      }
+      const metaData = await metaRes.json();
+      const meta = JSON.parse(metaData.content);
+      const partes = [];
+      for (let i = 0; i < meta.totalParts; i++) {
+        const partRes = await fetch(ASSET_URL(partKey(key, i)), { headers: { Accept: "application/json" } });
+        if (!partRes.ok) {
+          const corpo = await partRes.json().catch(() => ({}));
+          throw new Error(corpo.error || `Falha ao obter a parte ${i + 1}/${meta.totalParts} do conteúdo.`);
+        }
+        const partData = await partRes.json();
+        partes.push(partData.content);
+      }
+      return partes.join("");
+    },
+
+    async setAsset(key, content, onProgress) {
+      // regista quantos pedaços existiam antes desta gravação, para limpar
+      // sobras a seguir (ex.: se o novo ficheiro precisa de menos pedaços).
+      let totalPartsAntigo = 0;
+      try {
+        const metaRes = await fetch(ASSET_URL(metaKey(key)), { headers: { Accept: "application/json" } });
+        if (metaRes.ok) { const d = await metaRes.json(); totalPartsAntigo = JSON.parse(d.content).totalParts || 0; }
+      } catch (e) { /* sem manifesto anterior: assume 0 partes */ }
+
+      let totalPartsNovo = 0;
+      if (content.length <= TAMANHO_PEDACO) {
+        const res = await fetch(ASSET_URL(key), {
+          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content })
+        });
+        if (!res.ok) {
+          const corpo = await res.json().catch(() => ({}));
+          throw new Error(corpo.error || `Não foi possível gravar o conteúdo no servidor (HTTP ${res.status}).`);
+        }
+      } else {
+        totalPartsNovo = Math.ceil(content.length / TAMANHO_PEDACO);
+        for (let i = 0; i < totalPartsNovo; i++) {
+          const pedaco = content.slice(i * TAMANHO_PEDACO, (i + 1) * TAMANHO_PEDACO);
+          const res = await fetch(ASSET_URL(partKey(key, i)), {
+            method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: pedaco })
+          });
+          if (!res.ok) {
+            const corpo = await res.json().catch(() => ({}));
+            throw new Error(corpo.error || `Falha ao enviar a parte ${i + 1}/${totalPartsNovo} do ficheiro.`);
+          }
+          if (onProgress) onProgress(i + 1, totalPartsNovo);
+        }
+        const resMeta = await fetch(ASSET_URL(metaKey(key)), {
+          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: JSON.stringify({ totalParts: totalPartsNovo }) })
+        });
+        if (!resMeta.ok) {
+          const corpo = await resMeta.json().catch(() => ({}));
+          throw new Error(corpo.error || "Falha ao gravar o índice do conteúdo fragmentado.");
+        }
+        fetch(ASSET_URL(key), { method: "DELETE" }).catch(() => {}); // limpa um eventual conteúdo "simples" de uma gravação anterior
+      }
+
+      // limpeza best-effort de pedaços que já não são precisos
+      if (totalPartsNovo === 0 && totalPartsAntigo > 0) fetch(ASSET_URL(metaKey(key)), { method: "DELETE" }).catch(() => {});
+      for (let i = totalPartsNovo; i < totalPartsAntigo; i++) fetch(ASSET_URL(partKey(key, i)), { method: "DELETE" }).catch(() => {});
+    },
+
+    async deleteAsset(key) {
+      try {
+        await fetch(ASSET_URL(key), { method: "DELETE" });
+        const metaRes = await fetch(ASSET_URL(metaKey(key)));
+        if (metaRes.ok) {
+          const metaData = await metaRes.json();
+          const meta = JSON.parse(metaData.content);
+          await fetch(ASSET_URL(metaKey(key)), { method: "DELETE" }).catch(() => {});
+          for (let i = 0; i < meta.totalParts; i++) fetch(ASSET_URL(partKey(key, i)), { method: "DELETE" }).catch(() => {});
+        }
+      } catch (e) { /* limpeza best-effort — não bloqueia o resto do fluxo */ }
     }
   };
 }

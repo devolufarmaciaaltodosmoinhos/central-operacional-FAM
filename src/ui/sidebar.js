@@ -63,7 +63,7 @@ export function renderSidebar(container, state, handlers) {
       <button class="nav-item ${state.scope.tipo === "tudo" ? "active" : ""}" data-nav="tudo">${icon("layers")} Ver tudo <span class="nav-count">${stats.total}</span></button>
     </div>
 
-    <div style="display:flex;flex-direction:column;gap:8px;min-height:0;">
+    <div class="sidebar-section-categorias">
       <div class="nav-label">
         <span>Categorias</span>
         <button data-add-cat title="Nova categoria" style="background:none;border:none;color:#cdeada;">${icon("plus")}</button>
@@ -90,14 +90,15 @@ export function renderSidebar(container, state, handlers) {
         <span class="dot"></span>
         <span>${state.syncStatus === "synced" ? "Sincronizado" : state.syncStatus === "syncing" ? "A sincronizar..." : "Erro ao sincronizar"}</span>
       </div>
-      <div class="dev-badge">
+      <a class="dev-badge" href="tel:+351963257770" title="Contacto: +351 963 257 770">
         <img src="assets/dev-logo.png" alt="Ivo Batalha Software Development">
         <div class="dev-text">
           <small>Desenvolvido por</small>
           <span>Ivo Batalha</span>
           <span class="dev-sub">Software Development</span>
+          <span class="dev-contacto">+351 963 257 770</span>
         </div>
-      </div>
+      </a>
     </div>
   `;
 

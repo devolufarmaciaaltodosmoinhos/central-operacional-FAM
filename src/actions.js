@@ -19,7 +19,16 @@ import { bus } from "./events.js";
 import { nowTs, uid } from "./utils.js";
 import { CATEGORIA_INDEFINIDA_ID, CATEGORIAS_PADRAO } from "./domain.js";
 
-function stripTransient(s) { const { blobUrl, ...rest } = s; return rest; }
+function stripTransient(s) {
+  // `htmlContent` NUNCA vai no payload do estado geral: vive no seu próprio
+  // blob (ver `servico-html:<id>` via dataStore.setAsset/getAsset), para que
+  // o pedido de gravação do estado se mantenha sempre leve, por muitos ou
+  // grandes que sejam os documentos HTML já carregados. Ver `abrirEmNovaAba`
+  // para o fallback que vai buscar o conteúdo quando não está em memória.
+  const { blobUrl, htmlContent, ...rest } = s;
+  return rest;
+}
+function chaveHtmlServico(id) { return `servico-html:${id}`; }
 
 export function createActions(store, dataStore) {
   let syncTimer = null;
@@ -95,7 +104,7 @@ export function createActions(store, dataStore) {
       await dataStore.setConfig("nomeFarmacia", nome);
     },
 
-    async criarServico(dados) {
+    async criarServico(dados, onProgress) {
       const st = store.getState();
       const maxOrdem = st.servicos.reduce((m, s) => Math.max(m, s.ordem || 0), -1);
       const novo = {
@@ -110,14 +119,35 @@ export function createActions(store, dataStore) {
       };
       store.dispatch({ type: "ADD_SERVICO", servico: novo });
       scheduleSync("criar-servico");
+      if (novo.tipo === "html" && novo.htmlContent) {
+        try {
+          await dataStore.setAsset(chaveHtmlServico(novo.id), novo.htmlContent, onProgress);
+        } catch (err) {
+          console.error("Erro ao guardar o conteúdo HTML:", err);
+          bus.emit("toast:show", { type: "err", msg: `Serviço "${novo.nome}" criado, mas o ficheiro HTML não foi guardado no servidor: ${err.message}` });
+          return novo;
+        }
+      }
       bus.emit("toast:show", { type: "ok", msg: `Serviço "${novo.nome}" adicionado.` });
       return novo;
     },
 
-    async atualizarServico(id, dados) {
+    async atualizarServico(id, dados, onProgress) {
       store.dispatch({ type: "UPDATE_SERVICO", id, dados: { ...dados, atualizadoEm: nowTs() } });
       scheduleSync("atualizar-servico");
       const atualizado = store.getState().servicos.find(s => s.id === id);
+      // `dados.htmlContent` só vem preenchido quando o utilizador carregou um
+      // NOVO ficheiro nesta edição — se não veio, o conteúdo existente no
+      // servidor mantém-se intocado (não há nada para gravar aqui).
+      if (dados.tipo === "html" && typeof dados.htmlContent === "string" && dados.htmlContent) {
+        try {
+          await dataStore.setAsset(chaveHtmlServico(id), dados.htmlContent, onProgress);
+        } catch (err) {
+          console.error("Erro ao guardar o conteúdo HTML:", err);
+          bus.emit("toast:show", { type: "err", msg: `Serviço "${atualizado?.nome || ""}" atualizado, mas o novo ficheiro HTML não foi guardado no servidor: ${err.message}` });
+          return atualizado;
+        }
+      }
       if (atualizado) bus.emit("toast:show", { type: "ok", msg: `Serviço "${atualizado.nome}" atualizado.` });
       return atualizado;
     },
@@ -126,6 +156,7 @@ export function createActions(store, dataStore) {
       const alvo = store.getState().servicos.find(s => s.id === id);
       store.dispatch({ type: "REMOVE_SERVICO", id });
       scheduleSync("remover-servico");
+      if (alvo?.tipo === "html") dataStore.deleteAsset(chaveHtmlServico(id));
       if (alvo) bus.emit("toast:show", { type: "warn", msg: `Serviço "${alvo.nome}" removido.` });
     },
 
@@ -144,19 +175,54 @@ export function createActions(store, dataStore) {
       scheduleSync("acesso");
     },
 
+    /**
+     * Abre o serviço numa nova aba. Para serviços HTML cujo conteúdo já está
+     * em memória (criados/editados nesta mesma sessão), abre de imediato.
+     * Caso contrário (carregado noutra sessão/computador, onde o estado
+     * geral nunca inclui o HTML completo), vai buscar o conteúdo ao seu blob
+     * próprio primeiro. Abre a aba em branco de imediato (dentro do mesmo
+     * gesto do utilizador) e só depois navega para o conteúdo, para não ser
+     * bloqueado como pop-up pelo browser.
+     */
     abrirEmNovaAba(id) {
       const st = store.getState();
       const serv = st.servicos.find(s => s.id === id);
       if (!serv) return;
-      let url = null;
+
       if (serv.tipo === "url" && serv.url) {
-        url = /^https?:\/\//i.test(serv.url) ? serv.url : "https://" + serv.url;
-      } else if (serv.tipo === "html" && serv.htmlContent) {
-        const blob = new Blob([serv.htmlContent], { type: "text/html" });
-        url = URL.createObjectURL(blob);
+        const url = /^https?:\/\//i.test(serv.url) ? serv.url : "https://" + serv.url;
+        window.open(url, "_blank");
+        actions.registarAcesso(id);
+        return;
       }
-      if (url) { window.open(url, "_blank"); actions.registarAcesso(id); }
-      else bus.emit("toast:show", { type: "err", msg: "Serviço sem conteúdo válido. Edite nas configurações." });
+
+      if (serv.tipo === "html" && serv.htmlContent) {
+        const blob = new Blob([serv.htmlContent], { type: "text/html" });
+        window.open(URL.createObjectURL(blob), "_blank");
+        actions.registarAcesso(id);
+        return;
+      }
+
+      if (serv.tipo === "html") {
+        const janela = window.open("", "_blank");
+        dataStore.getAsset(chaveHtmlServico(id)).then(content => {
+          if (!content) {
+            bus.emit("toast:show", { type: "err", msg: "Não foi possível encontrar o conteúdo deste serviço no servidor." });
+            if (janela) janela.close();
+            return;
+          }
+          const blob = new Blob([content], { type: "text/html" });
+          if (janela) janela.location.href = URL.createObjectURL(blob);
+          actions.registarAcesso(id);
+        }).catch(err => {
+          console.error("Erro ao carregar conteúdo HTML:", err);
+          bus.emit("toast:show", { type: "err", msg: "Erro ao carregar o conteúdo deste serviço: " + err.message });
+          if (janela) janela.close();
+        });
+        return;
+      }
+
+      bus.emit("toast:show", { type: "err", msg: "Serviço sem conteúdo válido. Edite nas configurações." });
     },
 
     async criarCategoria(nome, cor, parentId = null, imagem = null) {
@@ -182,12 +248,32 @@ export function createActions(store, dataStore) {
       scheduleSync("categoria-reordenada");
     },
 
-    exportarDados() {
+    async exportarDados() {
       const st = store.getState();
+      bus.emit("toast:show", { type: "ok", msg: "A preparar a cópia de segurança..." });
+      let servicosCompletos;
+      try {
+        servicosCompletos = await Promise.all(st.servicos.map(async (s) => {
+          const limpo = stripTransient(s);
+          if (s.tipo === "html") {
+            let conteudo = s.htmlContent;
+            if (!conteudo) {
+              try { conteudo = await dataStore.getAsset(chaveHtmlServico(s.id)); }
+              catch (err) { console.error(`Erro ao obter o conteúdo de "${s.nome}" para a exportação:`, err); }
+            }
+            limpo.htmlContent = conteudo || null;
+          }
+          return limpo;
+        }));
+      } catch (err) {
+        console.error("Erro ao preparar a exportação:", err);
+        bus.emit("toast:show", { type: "err", msg: "Erro ao preparar a cópia de segurança: " + err.message });
+        return;
+      }
       const payload = {
         versao: 4, exportadoEm: new Date().toISOString(),
         nomeFarmacia: st.nomeFarmacia, logoBase64: st.logoBase64,
-        categorias: st.categorias, servicos: st.servicos.map(stripTransient)
+        categorias: st.categorias, servicos: servicosCompletos
       };
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
@@ -203,15 +289,31 @@ export function createActions(store, dataStore) {
         const text = await file.text();
         const data = JSON.parse(text);
         if (!data || !Array.isArray(data.servicos)) throw new Error("Ficheiro inválido.");
+
+        // O conteúdo HTML de cada serviço vai para o seu próprio blob antes de
+        // gravar o estado geral — senão importar um backup com documentos
+        // grandes voltaria a ultrapassar o limite de tamanho do pedido.
+        const servicosLeves = [];
+        for (const s of data.servicos) {
+          const { htmlContent, ...leve } = s;
+          servicosLeves.push(leve);
+          if (s.tipo === "html" && htmlContent) {
+            try { await dataStore.setAsset(chaveHtmlServico(s.id), htmlContent); }
+            catch (err) { console.error(`Erro ao importar o conteúdo de "${s.nome}":`, err); }
+          }
+        }
+
         const payload = {
-          servicos: data.servicos,
+          servicos: servicosLeves,
           categorias: Array.isArray(data.categorias) && data.categorias.length ? data.categorias : store.getState().categorias,
           logoBase64: data.logoBase64 || store.getState().logoBase64,
           nomeFarmacia: data.nomeFarmacia || store.getState().nomeFarmacia
         };
-        store.dispatch({ type: "IMPORT_DADOS", payload });
+        // No estado em memória (esta sessão) mantemos o htmlContent completo,
+        // para "abrir" funcionar de imediato sem precisar de ir já buscá-lo.
+        store.dispatch({ type: "IMPORT_DADOS", payload: { ...payload, servicos: data.servicos } });
         await Promise.all([
-          dataStore.putAll("servicos", payload.servicos),
+          dataStore.putAll("servicos", servicosLeves),
           dataStore.putAll("categorias", payload.categorias),
           dataStore.setConfig("logo", payload.logoBase64),
           dataStore.setConfig("nomeFarmacia", payload.nomeFarmacia)

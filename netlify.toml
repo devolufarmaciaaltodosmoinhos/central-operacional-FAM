@@ -12,6 +12,12 @@
   to = "/.netlify/functions/data"
   status = 200
 
+# API de conteúdos pesados individuais (HTML/imagens grandes) — ver netlify/functions/asset.js
+[[redirects]]
+  from = "/api/asset/*"
+  to = "/.netlify/functions/asset/:splat"
+  status = 200
+
 # ---------------------------------------------------------------------------
 # Cabeçalhos — desempenho e segurança
 # ---------------------------------------------------------------------------

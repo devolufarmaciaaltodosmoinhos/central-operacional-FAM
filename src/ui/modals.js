@@ -22,8 +22,25 @@ function lerArquivoComoTexto(file) {
   });
 }
 
+/**
+ * As imagens (logótipo, botão de serviço, imagem de categoria) ficam
+ * embutidas em base64 dentro do estado geral — ao contrário do conteúdo
+ * HTML, não têm um blob próprio. Um limite generoso aqui evita que uma
+ * fotografia grande, sem querer, comece a aproximar o estado geral do
+ * limite de tamanho do pedido (o mesmo problema que afetava os HTML antes
+ * de terem passado a ter um blob próprio).
+ */
+const LIMITE_IMAGEM_KB = 700;
+function validarTamanhoImagem(file) {
+  const tamanhoKB = file.size / 1024;
+  if (tamanhoKB > LIMITE_IMAGEM_KB) {
+    throw new Error(`Imagem demasiado grande (${(tamanhoKB / 1024).toFixed(1)}MB). Use uma imagem até ${(LIMITE_IMAGEM_KB / 1024).toFixed(1)}MB (ex.: redimensione ou comprima antes de carregar).`);
+  }
+}
+
 export function initModals(el, store, actions) {
   let editandoId = null;
+  let editandoTipoOriginal = null;
   let tagsAtuais = [];
   let categoriaImagemPendente = null;
 
@@ -53,7 +70,11 @@ export function initModals(el, store, actions) {
   el.nomeFarmaciaInput.addEventListener("change", (e) => actions.setNomeFarmacia(e.target.value.trim() || "Farmácia Alto dos Moinhos"));
   el.modalLogoUpload.addEventListener("change", async (e) => {
     if (!e.target.files.length) return;
-    try { await actions.setLogo(await lerArquivoComoBase64(e.target.files[0])); renderLogoPreviewModal(); }
+    try {
+      validarTamanhoImagem(e.target.files[0]);
+      await actions.setLogo(await lerArquivoComoBase64(e.target.files[0]));
+      renderLogoPreviewModal();
+    }
     catch (err) { bus.emit("toast:show", { type: "err", msg: "Erro ao alterar logótipo: " + err.message }); }
   });
   function renderLogoPreviewModal() {
@@ -103,7 +124,7 @@ export function initModals(el, store, actions) {
   el.btnCancelarForm.addEventListener("click", resetForm);
 
   function resetForm() {
-    editandoId = null; tagsAtuais = [];
+    editandoId = null; editandoTipoOriginal = null; tagsAtuais = [];
     el.formTitulo.innerText = "Adicionar serviço";
     el.servicoNome.value = ""; el.servicoDescricao.value = ""; el.servicoUrl.value = "";
     el.htmlFileInput.value = ""; el.imgFileInput.value = ""; el.imgUrlInput.value = "";
@@ -138,7 +159,7 @@ export function initModals(el, store, actions) {
   function editarServico(id) {
     const serv = st().servicos.find(s => s.id === id);
     if (!serv) return;
-    editandoId = id; tagsAtuais = (serv.tags || []).slice();
+    editandoId = id; editandoTipoOriginal = serv.tipo; tagsAtuais = (serv.tags || []).slice();
     el.formTitulo.innerText = "Editar serviço";
     el.servicoNome.value = serv.nome; el.servicoDescricao.value = serv.descricao || "";
     el.servicoUrl.value = serv.tipo === "url" ? (serv.url || "") : "";
@@ -170,31 +191,62 @@ export function initModals(el, store, actions) {
       const nome = el.servicoNome.value.trim();
       if (!nome) { el.formFeedback.textContent = "Nome do serviço é obrigatório."; el.formFeedback.className = "feedback err"; return; }
 
-      let imagemBase64 = null, imagemUrl = el.imgUrlInput.value.trim() || null, avisoImagem = false;
+      let imagemBase64 = null, imagemUrl = el.imgUrlInput.value.trim() || null;
       if (el.imgFileInput.files.length > 0) {
-        try { imagemBase64 = await lerArquivoComoBase64(el.imgFileInput.files[0]); imagemUrl = null; }
-        catch (err) { avisoImagem = true; }
+        try {
+          validarTamanhoImagem(el.imgFileInput.files[0]);
+          imagemBase64 = await lerArquivoComoBase64(el.imgFileInput.files[0]);
+          imagemUrl = null;
+        } catch (err) {
+          el.formFeedback.textContent = err.message;
+          el.formFeedback.className = "feedback err";
+          return;
+        }
       }
-      let tipo = "url", urlFinal = el.servicoUrl.value.trim(), htmlContent = null;
-      if (el.htmlFileInput.files.length > 0) {
-        try { htmlContent = await lerArquivoComoTexto(el.htmlFileInput.files[0]); tipo = "html"; urlFinal = null; }
+
+      // Resolução do tipo do serviço: um novo ficheiro HTML ou uma URL
+      // preenchida têm sempre prioridade (o utilizador escolheu ativamente
+      // mudar o conteúdo). Se estivermos a EDITAR um serviço que já era do
+      // tipo HTML e nada disto foi fornecido, o tipo e o conteúdo existentes
+      // mantêm-se — sem isto, guardar qualquer alteração (ex.: só o nome)
+      // num serviço HTML sem voltar a carregar o ficheiro transformava-o
+      // silenciosamente num serviço "URL" vazio e partido.
+      let tipo, urlFinal = el.servicoUrl.value.trim(), htmlContent;
+      const novoFicheiroHtml = el.htmlFileInput.files.length > 0;
+
+      if (novoFicheiroHtml) {
+        try { htmlContent = await lerArquivoComoTexto(el.htmlFileInput.files[0]); }
         catch (err) { el.formFeedback.textContent = err.message; el.formFeedback.className = "feedback err"; return; }
-      } else if (!urlFinal && editandoId === null) {
+        tipo = "html"; urlFinal = null;
+      } else if (urlFinal) {
+        tipo = "url"; htmlContent = null;
+      } else if (editandoId !== null && editandoTipoOriginal === "html") {
+        tipo = "html"; htmlContent = undefined; // undefined = não mexer no conteúdo já guardado
+      } else if (editandoId === null) {
         el.formFeedback.textContent = "Forneça uma URL ou carregue um ficheiro HTML.";
         el.formFeedback.className = "feedback err";
         return;
+      } else {
+        tipo = editandoTipoOriginal || "url"; // outros casos de edição: preserva o tipo atual
+        htmlContent = undefined;
       }
+
       const dados = {
-        nome, descricao: el.servicoDescricao.value.trim(), tipo, url: urlFinal, htmlContent,
+        nome, descricao: el.servicoDescricao.value.trim(), tipo, url: urlFinal,
         imagemBase64, imagemUrl, categoriaId: el.servicoCategoria.value, tags: tagsAtuais.slice(),
         favorito: el.servicoFavorito.checked, status: el.servicoStatus.value
       };
-      if (editandoId !== null) await actions.atualizarServico(editandoId, dados);
-      else await actions.criarServico(dados);
+      if (htmlContent !== undefined) dados.htmlContent = htmlContent;
+      const aoProgredir = (parte, total) => {
+        el.formFeedback.textContent = `A enviar ficheiro grande: parte ${parte} de ${total}...`;
+        el.formFeedback.className = "feedback warn";
+      };
+      if (editandoId !== null) await actions.atualizarServico(editandoId, dados, aoProgredir);
+      else await actions.criarServico(dados, aoProgredir);
 
       renderServicosGestao(el.gestaoSearchInput.value);
       resetForm();
-      el.formFeedback.textContent = avisoImagem ? "Guardado (imagem ignorada por erro de leitura)." : "";
+      el.formFeedback.textContent = "";
       el.formFeedback.className = "feedback ok";
     } catch (err) {
       console.error("Erro inesperado ao guardar:", err);
@@ -254,7 +306,12 @@ export function initModals(el, store, actions) {
       fileInput.type = "file"; fileInput.accept = "image/*";
       fileInput.addEventListener("change", async () => {
         if (!fileInput.files.length) return;
-        try { const b64 = await lerArquivoComoBase64(fileInput.files[0]); await actions.atualizarCategoria(catId, { imagem: b64 }); bus.emit("toast:show", { type: "ok", msg: "Imagem da categoria atualizada." }); }
+        try {
+          validarTamanhoImagem(fileInput.files[0]);
+          const b64 = await lerArquivoComoBase64(fileInput.files[0]);
+          await actions.atualizarCategoria(catId, { imagem: b64 });
+          bus.emit("toast:show", { type: "ok", msg: "Imagem da categoria atualizada." });
+        }
         catch (err) { bus.emit("toast:show", { type: "err", msg: "Erro ao carregar imagem: " + err.message }); }
       });
       fileInput.click();
@@ -266,7 +323,10 @@ export function initModals(el, store, actions) {
     if (!nome) { bus.emit("toast:show", { type: "err", msg: "Indique um nome para a categoria." }); return; }
     const parentId = el.novaCategoriaParent.value || null;
     let imagem = null;
-    if (categoriaImagemPendente) { try { imagem = await lerArquivoComoBase64(categoriaImagemPendente); } catch (e) { /* ignora */ } }
+    if (categoriaImagemPendente) {
+      try { validarTamanhoImagem(categoriaImagemPendente); imagem = await lerArquivoComoBase64(categoriaImagemPendente); }
+      catch (err) { bus.emit("toast:show", { type: "err", msg: err.message }); return; }
+    }
     await actions.criarCategoria(nome, el.novaCategoriaCor.value, parentId, imagem);
     el.novaCategoriaNome.value = ""; categoriaImagemPendente = null; el.novaCategoriaImgNome.innerText = "";
     renderCategoriasGestao();

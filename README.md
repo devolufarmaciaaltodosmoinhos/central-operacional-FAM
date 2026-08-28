@@ -29,7 +29,9 @@ src/
     palette.js                 paleta de comandos (Ctrl+K)
     toast.js                   notificações
 netlify/functions/
-  data.js                     função serverless: GET/PUT /api/data (lê/escreve no Netlify Blobs)
+  data.js                     função serverless: GET/PUT /api/data — estado leve (metadados)
+  asset.js                    função serverless: GET/PUT/DELETE /api/asset/:key — conteúdos pesados
+                              (o HTML completo de um serviço, por exemplo), cada um no seu próprio blob
 tests/                       testes unitários e de integração (Node test runner)
 sw.js                         service worker (cache do app-shell; NUNCA cacheia /api/*)
 netlify.toml                  rotas, cabeçalhos de cache/segurança e config das funções
@@ -147,11 +149,11 @@ Arraste a pasta do projeto para
 
 ## Esquema de dados (Netlify Blobs)
 
-Um único blob (`estado`, na store `central-farmacia`) com:
+Um blob principal (`estado`, na store `central-farmacia`) com o **índice leve**:
 
 ```json
 {
-  "servicos": [ { "id", "nome", "descricao", "tipo", "url"|"htmlContent",
+  "servicos": [ { "id", "nome", "descricao", "tipo", "url"|null,
                   "imagemBase64"|"imagemUrl", "categoriaId", "tags[]",
                   "favorito", "status", "ordem", "criadoEm", "atualizadoEm",
                   "ultimoAcesso", "contadorAcessos" } ],
@@ -165,6 +167,39 @@ eliminada ficam com `categoriaId: "cat_indefinida"` ("Categoria
 Indefinida"). A vinheta "Desenvolvido por" (logótipo e nome) já não faz
 parte deste esquema — está fixa no código (`src/ui/sidebar.js` +
 `assets/dev-logo.png`), não é editável pela farmácia.
+
+### Conteúdos pesados (blobs próprios, separados do índice, SEM limite de tamanho)
+
+**Importante**: para um serviço do tipo `"html"`, o campo `htmlContent`
+**nunca** aparece no blob `estado` acima. Vive no seu próprio blob,
+`asset:servico-html:<id>`, acedido via `/api/asset/servico-html:<id>`.
+
+Isto existe porque o blob `estado` é enviado por INTEIRO a cada gravação —
+se o HTML completo de cada documento carregado estivesse ali embutido,
+bastariam alguns ficheiros grandes (ex.: formulários com centenas de KB)
+para ultrapassar o limite de 6MB por pedido das funções do Netlify, e
+**todas** as gravações seguintes (mesmo de serviços pequenos) passavam a
+falhar. Com o conteúdo separado, o índice mantém-se sempre pequeno e
+rápido, e só se envia o conteúdo pesado quando esse serviço específico é
+criado ou tem um novo ficheiro carregado.
+
+**Ficheiros de qualquer tamanho**: o limite de 6MB por pedido do Netlify
+continua a existir a nível de cada pedido individual — por isso, ficheiros
+maiores do que isso são automaticamente divididos em pedaços de 2MB pelo
+cliente (`src/db.js`, `setAsset`/`getAsset`), cada um gravado no seu
+próprio blob (`...:part:0`, `...:part:1`, ...) com um pequeno manifesto
+(`...:meta`) a indicar quantas partes existem. Na leitura, as partes são
+automaticamente remontadas pela ordem correta. Tudo isto é invisível para
+quem usa a Central — só é preciso saber que **não há limite prático de
+tamanho** para um documento HTML carregado. Testado com sucesso com um
+ficheiro de 13MB (verificado byte a byte, com hash SHA-256, contra o
+original).
+
+Imagens (logótipo, botão de serviço, imagem de categoria) continuam
+embutidas em base64 no índice, mas com um limite de tamanho no upload
+(700KB) para nunca se tornarem, por acumulação, o mesmo problema — este
+limite é intencional (ícones não precisam de ser grandes), ao contrário do
+HTML, que não tem qualquer limite artificial.
 
 ### Migração automática de dados antigos
 

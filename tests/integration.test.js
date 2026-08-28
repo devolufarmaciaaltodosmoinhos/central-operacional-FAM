@@ -8,28 +8,53 @@ import { createActions } from "../src/actions.js";
 import { CATEGORIA_INDEFINIDA_ID, CATEGORIAS_PADRAO } from "../src/domain.js";
 
 /**
- * Simula o endpoint /api/data (a função Netlify) em memória, para testar
- * db.js e actions.js exatamente como se comunicam com o servidor real,
- * sem precisar de infraestrutura do Netlify nestes testes.
+ * Simula os endpoints /api/data e /api/asset/:key (as funções Netlify) em
+ * memória, para testar db.js e actions.js exatamente como se comunicam com
+ * o servidor real, sem precisar de infraestrutura do Netlify nestes testes.
  */
 function mockApiServidor(estadoInicial = { servicos: [], categorias: [], config: {} }) {
   let estado = structuredClone(estadoInicial);
-  const chamadas = { get: 0, put: 0 };
+  const assets = new Map();
+  const chamadas = { get: 0, put: 0, assetGet: 0, assetPut: 0, assetDelete: 0 };
   global.fetch = async (url, opts) => {
-    if (!String(url).includes("/api/data")) throw new Error("URL inesperada: " + url);
-    if (!opts || !opts.method || opts.method === "GET") {
+    const urlStr = String(url);
+    const method = opts?.method || "GET";
+
+    if (urlStr.includes("/api/asset/")) {
+      const key = decodeURIComponent(urlStr.split("/api/asset/")[1]);
+      if (method === "GET") {
+        chamadas.assetGet++;
+        if (!assets.has(key)) return { ok: false, status: 404, json: async () => ({ error: "Não encontrado." }) };
+        return { ok: true, status: 200, json: async () => ({ content: assets.get(key) }) };
+      }
+      if (method === "PUT") {
+        chamadas.assetPut++;
+        const body = JSON.parse(opts.body);
+        assets.set(key, body.content);
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      if (method === "DELETE") {
+        chamadas.assetDelete++;
+        assets.delete(key);
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      throw new Error("Método inesperado (asset): " + method);
+    }
+
+    if (!urlStr.includes("/api/data")) throw new Error("URL inesperada: " + urlStr);
+    if (method === "GET") {
       chamadas.get++;
       return { ok: true, status: 200, json: async () => estado };
     }
-    if (opts.method === "PUT") {
+    if (method === "PUT") {
       chamadas.put++;
       const body = JSON.parse(opts.body);
       estado = { servicos: body.servicos || [], categorias: body.categorias || [], config: body.config || {} };
       return { ok: true, status: 200, json: async () => ({ ok: true }) };
     }
-    throw new Error("Método inesperado: " + opts.method);
+    throw new Error("Método inesperado: " + method);
   };
-  return { getEstado: () => estado, chamadas };
+  return { getEstado: () => estado, getAssets: () => assets, chamadas };
 }
 
 async function novoAmbiente(estadoInicial) {
@@ -100,6 +125,104 @@ describe("integração — categorias e reatribuição (via API)", () => {
     await actions.removerCategoria(cat.id);
     const atualizado = store.getState().servicos.find(s => s.id === serv.id);
     assert.equal(atualizado.categoriaId, CATEGORIA_INDEFINIDA_ID);
+  });
+});
+
+describe("integração — conteúdo HTML em blob próprio (REGRESSÃO do limite de tamanho)", () => {
+  test("criar serviço HTML grava o conteúdo no blob próprio, NUNCA no payload de /api/data", async () => {
+    const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
+    const catId = store.getState().categorias[0].id;
+    const conteudoGrande = "<html>" + "x".repeat(50000) + "</html>";
+    const novo = await actions.criarServico({ nome: "Formulário Grande", tipo: "html", htmlContent: conteudoGrande, categoriaId: catId });
+    await actions.flushSync("t");
+
+    const noServidor = servidor.getEstado().servicos.find(s => s.id === novo.id);
+    assert.equal(noServidor.htmlContent, undefined, "o payload de /api/data nunca deve incluir htmlContent");
+    assert.equal(servidor.getAssets().get(`servico-html:${novo.id}`), conteudoGrande, "o conteúdo tem de estar no blob próprio");
+  });
+
+  test("REGRESSÃO: editar um serviço HTML sem carregar novo ficheiro NÃO apaga o conteúdo existente", async () => {
+    const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
+    const catId = store.getState().categorias[0].id;
+    const conteudoOriginal = "<html>conteúdo original</html>";
+    const novo = await actions.criarServico({ nome: "Formulário", tipo: "html", htmlContent: conteudoOriginal, categoriaId: catId });
+
+    // edição que só muda o nome, sem fornecer htmlContent (como faz modals.js quando não se escolhe novo ficheiro)
+    await actions.atualizarServico(novo.id, { nome: "Formulário Renomeado", descricao: "", tipo: "html", url: null, imagemBase64: null, imagemUrl: null, categoriaId: catId, tags: [], favorito: false, status: "ativo" });
+
+    assert.equal(servidor.getAssets().get(`servico-html:${novo.id}`), conteudoOriginal, "o conteúdo HTML não pode ter sido apagado por uma edição que não o tocou");
+    const atualizado = store.getState().servicos.find(s => s.id === novo.id);
+    assert.equal(atualizado.nome, "Formulário Renomeado");
+    assert.equal(atualizado.tipo, "html", "o tipo tem de continuar 'html', nunca deve ter virado 'url'");
+  });
+
+  test("editar um serviço HTML COM novo ficheiro substitui o conteúdo no blob", async () => {
+    const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
+    const catId = store.getState().categorias[0].id;
+    const novo = await actions.criarServico({ nome: "Formulário", tipo: "html", htmlContent: "<html>v1</html>", categoriaId: catId });
+    await actions.atualizarServico(novo.id, { nome: "Formulário", tipo: "html", htmlContent: "<html>v2</html>", url: null, imagemBase64: null, imagemUrl: null, categoriaId: catId, tags: [], favorito: false, status: "ativo" });
+    assert.equal(servidor.getAssets().get(`servico-html:${novo.id}`), "<html>v2</html>");
+  });
+
+  test("eliminar um serviço HTML remove também o seu conteúdo do servidor", async () => {
+    const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
+    const catId = store.getState().categorias[0].id;
+    const novo = await actions.criarServico({ nome: "Formulário", tipo: "html", htmlContent: "<html>x</html>", categoriaId: catId });
+    await actions.removerServico(novo.id);
+    await new Promise(r => setTimeout(r, 0)); // deixa o delete "fire-and-forget" terminar
+    assert.equal(servidor.getAssets().has(`servico-html:${novo.id}`), false);
+  });
+
+  test("abrir um serviço HTML cujo conteúdo não está em memória vai buscá-lo ao blob (outro computador)", async () => {
+    const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
+    // simula um serviço já existente no servidor (criado por outro computador), tal como chega via GET /api/data
+    servidor.getEstado().servicos.push({ id: "srv_outro", nome: "Vindo de outro PC", tipo: "html", categoriaId: "cat_geral", ordem: 0, favorito: false, status: "ativo", tags: [], contadorAcessos: 0 });
+    servidor.getAssets().set("servico-html:srv_outro", "<html>conteúdo remoto</html>");
+    await actions.recarregarDoServidor();
+
+    const servicoEmMemoria = store.getState().servicos.find(s => s.id === "srv_outro");
+    assert.equal(servicoEmMemoria.htmlContent, undefined, "o estado geral não traz o htmlContent");
+
+    // window/Blob/URL não existem no Node — simulamos apenas a parte de obtenção do conteúdo
+    const { makeDataStore } = await import("../src/db.js");
+    const conteudo = await makeDataStore().getAsset(`servico-html:${servicoEmMemoria.id}`);
+    assert.equal(conteudo, "<html>conteúdo remoto</html>");
+  });
+
+  test("exportarDados inclui o htmlContent mesmo quando só existe no servidor (não em memória)", async () => {
+    const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
+    servidor.getEstado().servicos.push({ id: "srv_outro", nome: "Vindo de outro PC", tipo: "html", categoriaId: "cat_geral", ordem: 0, favorito: false, status: "ativo", tags: [], contadorAcessos: 0 });
+    servidor.getAssets().set("servico-html:srv_outro", "<html>conteúdo remoto</html>");
+    await actions.recarregarDoServidor();
+
+    // capta o Blob criado por exportarDados sem depender das APIs de DOM/URL do browser
+    let payloadExportado = null;
+    global.Blob = class { constructor(parts) { payloadExportado = JSON.parse(parts[0]); } };
+    global.URL.createObjectURL = () => "blob:fake";
+    global.document = {
+      createElement: () => ({ click() {}, remove() {}, set href(v) {}, set download(v) {} }),
+      body: { appendChild() {} }
+    };
+    await actions.exportarDados();
+
+    const servicoExportado = payloadExportado.servicos.find(s => s.id === "srv_outro");
+    assert.equal(servicoExportado.htmlContent, "<html>conteúdo remoto</html>");
+  });
+
+  test("importarDados guarda o htmlContent no blob próprio, não no payload de /api/data", async () => {
+    const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
+    const ficheiroImportado = {
+      servicos: [{ id: "srv_importado", nome: "Importado", tipo: "html", htmlContent: "<html>importado</html>", categoriaId: "cat_geral", ordem: 0, favorito: false, status: "ativo", tags: [], contadorAcessos: 0 }],
+      categorias: CATEGORIAS_PADRAO
+    };
+    const file = { text: async () => JSON.stringify(ficheiroImportado) };
+    await actions.importarDados(file);
+
+    assert.equal(servidor.getAssets().get("servico-html:srv_importado"), "<html>importado</html>");
+    const noServidor = servidor.getEstado().servicos.find(s => s.id === "srv_importado");
+    assert.equal(noServidor.htmlContent, undefined, "o payload principal não deve incluir o htmlContent importado");
+    const emMemoria = store.getState().servicos.find(s => s.id === "srv_importado");
+    assert.equal(emMemoria.htmlContent, "<html>importado</html>", "em memória, nesta sessão, o conteúdo fica disponível de imediato");
   });
 });
 
