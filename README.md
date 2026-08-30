@@ -141,8 +141,14 @@ Arraste a pasta do projeto para
   *network-first*, CSS/JS em *stale-while-revalidate*. O endpoint
   `/api/data` está explicitamente excluído do cache do service worker,
   para nunca mostrar dados desatualizados.
-- **Cabeçalhos** (`netlify.toml`): CSP estrita, `Cache-Control` ajustado
-  por tipo de ficheiro, `/api/*` sempre `no-store`.
+- **Cabeçalhos** (`netlify.toml`): CSP estrita para a própria app (só
+  `'self'`), mas permite `https:` em `script-src`/`style-src`/`font-src`/
+  `connect-src` para os documentos HTML carregados pela farmácia — estes
+  são abertos como `blob:` e HERDAM esta mesma CSP (não têm resposta HTTP
+  própria para enviar o seu próprio cabeçalho), por isso um documento que
+  use bibliotecas de CDN (ex.: cdnjs) ou Google Fonts só funciona dentro
+  da Central se a CSP permitir. Ver `tests/csp.test.js` para os testes de
+  regressão que garantem que isto nunca volta a ser apertado sem cuidado.
 - **Escritas otimistas e agrupadas**: as alterações aparecem de imediato
   na interface e são persistidas no servidor de forma assíncrona e
   agrupada (*debounce*), com indicador de sincronização na sidebar.
@@ -153,7 +159,8 @@ Um blob principal (`estado`, na store `central-farmacia`) com o **índice leve**
 
 ```json
 {
-  "servicos": [ { "id", "nome", "descricao", "tipo", "url"|null,
+  "servicos": [ { "id", "nome", "descricao", "tipo": "url"|"html"|"arquivo",
+                  "url"|null, "arquivoNome"|null,
                   "imagemBase64"|"imagemUrl", "categoriaId", "tags[]",
                   "favorito", "status", "ordem", "criadoEm", "atualizadoEm",
                   "ultimoAcesso", "contadorAcessos" } ],
@@ -161,6 +168,11 @@ Um blob principal (`estado`, na store `central-farmacia`) com o **índice leve**
   "config": { "logo": "...", "nomeFarmacia": "..." }
 }
 ```
+
+Um serviço pode ser: uma **URL** externa, um **HTML** carregado (self-contained),
+ou um **ficheiro** carregado (PDF, Word, Excel, imagem, etc. — qualquer tipo).
+Para `tipo: "arquivo"`, `arquivoNome` guarda o nome original do ficheiro
+(exibido na gestão de serviços); o conteúdo real vive à parte, ver abaixo.
 
 `parentId` permite subcategorias ilimitadas. Serviços cuja categoria foi
 eliminada ficam com `categoriaId: "cat_indefinida"` ("Categoria
@@ -170,30 +182,33 @@ parte deste esquema — está fixa no código (`src/ui/sidebar.js` +
 
 ### Conteúdos pesados (blobs próprios, separados do índice, SEM limite de tamanho)
 
-**Importante**: para um serviço do tipo `"html"`, o campo `htmlContent`
-**nunca** aparece no blob `estado` acima. Vive no seu próprio blob,
-`asset:servico-html:<id>`, acedido via `/api/asset/servico-html:<id>`.
+**Importante**: para um serviço do tipo `"html"` ou `"arquivo"`, o campo
+`htmlContent`/`arquivoBase64` **nunca** aparece no blob `estado` acima.
+Vive no seu próprio blob, `asset:servico-conteudo:<id>`, acedido via
+`/api/asset/servico-conteudo:<id>`.
 
 Isto existe porque o blob `estado` é enviado por INTEIRO a cada gravação —
-se o HTML completo de cada documento carregado estivesse ali embutido,
-bastariam alguns ficheiros grandes (ex.: formulários com centenas de KB)
-para ultrapassar o limite de 6MB por pedido das funções do Netlify, e
-**todas** as gravações seguintes (mesmo de serviços pequenos) passavam a
-falhar. Com o conteúdo separado, o índice mantém-se sempre pequeno e
-rápido, e só se envia o conteúdo pesado quando esse serviço específico é
-criado ou tem um novo ficheiro carregado.
+se o conteúdo completo de cada documento carregado estivesse ali embutido,
+bastariam alguns ficheiros grandes (ex.: formulários com centenas de KB,
+PDFs digitalizados) para ultrapassar o limite de 6MB por pedido das
+funções do Netlify, e **todas** as gravações seguintes (mesmo de serviços
+pequenos) passavam a falhar. Com o conteúdo separado, o índice mantém-se
+sempre pequeno e rápido, e só se envia o conteúdo pesado quando esse
+serviço específico é criado ou tem um novo ficheiro carregado.
 
-**Ficheiros de qualquer tamanho**: o limite de 6MB por pedido do Netlify
-continua a existir a nível de cada pedido individual — por isso, ficheiros
-maiores do que isso são automaticamente divididos em pedaços de 2MB pelo
-cliente (`src/db.js`, `setAsset`/`getAsset`), cada um gravado no seu
-próprio blob (`...:part:0`, `...:part:1`, ...) com um pequeno manifesto
-(`...:meta`) a indicar quantas partes existem. Na leitura, as partes são
-automaticamente remontadas pela ordem correta. Tudo isto é invisível para
-quem usa a Central — só é preciso saber que **não há limite prático de
-tamanho** para um documento HTML carregado. Testado com sucesso com um
-ficheiro de 13MB (verificado byte a byte, com hash SHA-256, contra o
-original).
+**Ficheiros de qualquer tamanho, de qualquer tipo**: além de URL e HTML,
+é possível carregar qualquer outro ficheiro (PDF, Word, Excel, imagens,
+etc.) através do campo "Carregar ficheiro" no formulário de serviço. O
+limite de 6MB por pedido do Netlify continua a existir a nível de cada
+pedido individual — por isso, ficheiros maiores do que isso são
+automaticamente divididos em pedaços de 2MB pelo cliente (`src/db.js`,
+`setAsset`/`getAsset`), cada um gravado no seu próprio blob (`...:part:0`,
+`...:part:1`, ...) com um pequeno manifesto (`...:meta`) a indicar quantas
+partes existem. Na leitura, as partes são automaticamente remontadas pela
+ordem correta. Tudo isto é invisível para quem usa a Central — só é
+preciso saber que **não há limite prático de tamanho**. Testado com
+sucesso com um ficheiro HTML de 13MB e com um PDF (verificados byte a
+byte, com hash SHA-256, contra o original).
 
 Imagens (logótipo, botão de serviço, imagem de categoria) continuam
 embutidas em base64 no índice, mas com um limite de tamanho no upload

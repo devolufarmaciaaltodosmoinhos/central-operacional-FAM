@@ -29,12 +29,17 @@
     X-Frame-Options = "DENY"
     Referrer-Policy = "strict-origin-when-cross-origin"
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
-    # 'unsafe-inline' em script-src/style-src é necessário porque os serviços do
-    # tipo HTML (carregados pela farmácia) são abertos como blob: e HERDAM esta
-    # mesma CSP (blob: não tem resposta HTTP própria para enviar o seu próprio
-    # cabeçalho). Sem isto, qualquer <style>/<script> inline nesses documentos
-    # fica bloqueado e o documento aparece completamente desformatado.
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; upgrade-insecure-requests"
+    # 'unsafe-inline' + 'https:' em script-src/style-src/font-src são
+    # necessários porque os serviços do tipo HTML/ficheiro (carregados pela
+    # farmácia) são abertos como blob: e HERDAM esta mesma CSP (blob: não
+    # tem resposta HTTP própria para enviar o seu próprio cabeçalho). Sem
+    # 'https:', qualquer documento que use um CDN externo (ex.: cdnjs para
+    # bibliotecas JS, Google Fonts) fica bloqueado e deixa de funcionar
+    # dentro da Central mesmo funcionando perfeitamente fora dela. A nossa
+    # própria app nunca carrega nada de fora (só 'self'), por isso esta
+    # abertura só afeta os documentos carregados pela farmácia, que são
+    # conteúdo interno e confiado, não conteúdo de terceiros arbitrário.
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self' https:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; upgrade-insecure-requests"
 
 # HTML — nunca em cache agressiva (garante que a próxima visita vê a versão mais recente)
 [[headers]]

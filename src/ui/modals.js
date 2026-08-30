@@ -93,12 +93,13 @@ export function initModals(el, store, actions) {
       const img = s.imagemBase64 || s.imagemUrl || placeholderImg(s.nome);
       const catNome = getCategoriaNome(st().categorias, s.categoriaId || CATEGORIA_INDEFINIDA_ID);
       const badgeStatus = s.status !== "ativo" ? `<span class="mini-badge status-${s.status}">${s.status}</span>` : "";
+      const badgeTipo = s.tipo === "arquivo" ? `<span class="mini-badge" title="${escapeHtml(s.arquivoNome || "")}">${icon("upload")} ${escapeHtml(s.arquivoNome || "ficheiro")}</span>` : "";
       return `<div class="servico-item" data-id="${s.id}">
           <div class="servico-info">
             <img src="${img}" onerror="this.src='${placeholderImg(s.nome)}'">
             <div class="servico-info-text">
               <span class="si-nome">${escapeHtml(s.nome)}</span>
-              <span class="si-meta"><span class="mini-badge">${escapeHtml(catNome)}</span> ${badgeStatus} ${s.contadorAcessos ? s.contadorAcessos + "× usado" : ""}</span>
+              <span class="si-meta"><span class="mini-badge">${escapeHtml(catNome)}</span> ${badgeStatus} ${badgeTipo} ${s.contadorAcessos ? s.contadorAcessos + "× usado" : ""}</span>
             </div>
           </div>
           <div class="servico-actions">
@@ -127,8 +128,8 @@ export function initModals(el, store, actions) {
     editandoId = null; editandoTipoOriginal = null; tagsAtuais = [];
     el.formTitulo.innerText = "Adicionar serviço";
     el.servicoNome.value = ""; el.servicoDescricao.value = ""; el.servicoUrl.value = "";
-    el.htmlFileInput.value = ""; el.imgFileInput.value = ""; el.imgUrlInput.value = "";
-    el.htmlFileName.innerText = ""; el.imgFileName.innerText = "";
+    el.htmlFileInput.value = ""; el.arquivoFileInput.value = ""; el.imgFileInput.value = ""; el.imgUrlInput.value = "";
+    el.htmlFileName.innerText = ""; el.arquivoFileName.innerText = ""; el.imgFileName.innerText = "";
     el.servicoStatus.value = "ativo"; el.servicoFavorito.checked = false; el.tagsInput.value = "";
     renderCategoriaSelect();
     if (el.servicoCategoria.options.length) el.servicoCategoria.value = st().categorias[0] ? st().categorias[0].id : CATEGORIA_INDEFINIDA_ID;
@@ -164,8 +165,9 @@ export function initModals(el, store, actions) {
     el.servicoNome.value = serv.nome; el.servicoDescricao.value = serv.descricao || "";
     el.servicoUrl.value = serv.tipo === "url" ? (serv.url || "") : "";
     el.imgUrlInput.value = serv.imagemUrl || "";
-    el.htmlFileInput.value = ""; el.imgFileInput.value = "";
+    el.htmlFileInput.value = ""; el.arquivoFileInput.value = ""; el.imgFileInput.value = "";
     el.htmlFileName.innerText = serv.tipo === "html" ? "Conteúdo HTML atual (substitui se enviar novo)" : "";
+    el.arquivoFileName.innerText = serv.tipo === "arquivo" ? `Ficheiro atual: ${serv.arquivoNome || "sem nome"} (substitui se enviar novo)` : "";
     el.imgFileName.innerText = "";
     el.servicoStatus.value = serv.status || "ativo"; el.servicoFavorito.checked = !!serv.favorito;
     renderCategoriaSelect();
@@ -178,6 +180,7 @@ export function initModals(el, store, actions) {
   window.__editarServicoViaSidebarOuGrid = editarServico;
 
   el.htmlFileInput.addEventListener("change", (e) => { el.htmlFileName.innerText = e.target.files.length ? `Ficheiro: ${e.target.files[0].name}` : ""; });
+  el.arquivoFileInput.addEventListener("change", (e) => { el.arquivoFileName.innerText = e.target.files.length ? `Ficheiro: ${e.target.files[0].name}` : ""; });
   el.imgFileInput.addEventListener("change", (e) => { el.imgFileName.innerText = e.target.files.length ? `Imagem: ${e.target.files[0].name}` : ""; });
 
   let salvando = false;
@@ -204,31 +207,40 @@ export function initModals(el, store, actions) {
         }
       }
 
-      // Resolução do tipo do serviço: um novo ficheiro HTML ou uma URL
-      // preenchida têm sempre prioridade (o utilizador escolheu ativamente
-      // mudar o conteúdo). Se estivermos a EDITAR um serviço que já era do
-      // tipo HTML e nada disto foi fornecido, o tipo e o conteúdo existentes
-      // mantêm-se — sem isto, guardar qualquer alteração (ex.: só o nome)
-      // num serviço HTML sem voltar a carregar o ficheiro transformava-o
+      // Resolução do tipo do serviço: um novo ficheiro (HTML ou genérico) ou
+      // uma URL preenchida têm sempre prioridade (o utilizador escolheu
+      // ativamente mudar o conteúdo). Se estivermos a EDITAR um serviço que
+      // já era do tipo HTML/ficheiro e nada disto foi fornecido, o tipo e o
+      // conteúdo existentes mantêm-se — sem isto, guardar qualquer alteração
+      // (ex.: só o nome) sem voltar a carregar o ficheiro transformava-o
       // silenciosamente num serviço "URL" vazio e partido.
-      let tipo, urlFinal = el.servicoUrl.value.trim(), htmlContent;
+      let tipo, urlFinal = el.servicoUrl.value.trim(), htmlContent, arquivoBase64, arquivoNome;
       const novoFicheiroHtml = el.htmlFileInput.files.length > 0;
+      const novoArquivoGenerico = el.arquivoFileInput.files.length > 0;
 
       if (novoFicheiroHtml) {
         try { htmlContent = await lerArquivoComoTexto(el.htmlFileInput.files[0]); }
         catch (err) { el.formFeedback.textContent = err.message; el.formFeedback.className = "feedback err"; return; }
         tipo = "html"; urlFinal = null;
+      } else if (novoArquivoGenerico) {
+        try {
+          arquivoBase64 = await lerArquivoComoBase64(el.arquivoFileInput.files[0]);
+          arquivoNome = el.arquivoFileInput.files[0].name;
+        } catch (err) { el.formFeedback.textContent = err.message; el.formFeedback.className = "feedback err"; return; }
+        tipo = "arquivo"; urlFinal = null;
       } else if (urlFinal) {
-        tipo = "url"; htmlContent = null;
+        tipo = "url"; htmlContent = null; arquivoBase64 = null;
       } else if (editandoId !== null && editandoTipoOriginal === "html") {
         tipo = "html"; htmlContent = undefined; // undefined = não mexer no conteúdo já guardado
+      } else if (editandoId !== null && editandoTipoOriginal === "arquivo") {
+        tipo = "arquivo"; arquivoBase64 = undefined; arquivoNome = undefined; // idem
       } else if (editandoId === null) {
-        el.formFeedback.textContent = "Forneça uma URL ou carregue um ficheiro HTML.";
+        el.formFeedback.textContent = "Forneça uma URL ou carregue um ficheiro (HTML, PDF, Word, Excel...).";
         el.formFeedback.className = "feedback err";
         return;
       } else {
         tipo = editandoTipoOriginal || "url"; // outros casos de edição: preserva o tipo atual
-        htmlContent = undefined;
+        htmlContent = undefined; arquivoBase64 = undefined;
       }
 
       const dados = {
@@ -237,6 +249,8 @@ export function initModals(el, store, actions) {
         favorito: el.servicoFavorito.checked, status: el.servicoStatus.value
       };
       if (htmlContent !== undefined) dados.htmlContent = htmlContent;
+      if (arquivoBase64 !== undefined) dados.arquivoBase64 = arquivoBase64;
+      if (arquivoNome !== undefined) dados.arquivoNome = arquivoNome;
       const aoProgredir = (parte, total) => {
         el.formFeedback.textContent = `A enviar ficheiro grande: parte ${parte} de ${total}...`;
         el.formFeedback.className = "feedback warn";

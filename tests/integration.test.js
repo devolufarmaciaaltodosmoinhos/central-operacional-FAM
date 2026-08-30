@@ -138,7 +138,7 @@ describe("integração — conteúdo HTML em blob próprio (REGRESSÃO do limite
 
     const noServidor = servidor.getEstado().servicos.find(s => s.id === novo.id);
     assert.equal(noServidor.htmlContent, undefined, "o payload de /api/data nunca deve incluir htmlContent");
-    assert.equal(servidor.getAssets().get(`servico-html:${novo.id}`), conteudoGrande, "o conteúdo tem de estar no blob próprio");
+    assert.equal(servidor.getAssets().get(`servico-conteudo:${novo.id}`), conteudoGrande, "o conteúdo tem de estar no blob próprio");
   });
 
   test("REGRESSÃO: editar um serviço HTML sem carregar novo ficheiro NÃO apaga o conteúdo existente", async () => {
@@ -150,7 +150,7 @@ describe("integração — conteúdo HTML em blob próprio (REGRESSÃO do limite
     // edição que só muda o nome, sem fornecer htmlContent (como faz modals.js quando não se escolhe novo ficheiro)
     await actions.atualizarServico(novo.id, { nome: "Formulário Renomeado", descricao: "", tipo: "html", url: null, imagemBase64: null, imagemUrl: null, categoriaId: catId, tags: [], favorito: false, status: "ativo" });
 
-    assert.equal(servidor.getAssets().get(`servico-html:${novo.id}`), conteudoOriginal, "o conteúdo HTML não pode ter sido apagado por uma edição que não o tocou");
+    assert.equal(servidor.getAssets().get(`servico-conteudo:${novo.id}`), conteudoOriginal, "o conteúdo HTML não pode ter sido apagado por uma edição que não o tocou");
     const atualizado = store.getState().servicos.find(s => s.id === novo.id);
     assert.equal(atualizado.nome, "Formulário Renomeado");
     assert.equal(atualizado.tipo, "html", "o tipo tem de continuar 'html', nunca deve ter virado 'url'");
@@ -161,7 +161,7 @@ describe("integração — conteúdo HTML em blob próprio (REGRESSÃO do limite
     const catId = store.getState().categorias[0].id;
     const novo = await actions.criarServico({ nome: "Formulário", tipo: "html", htmlContent: "<html>v1</html>", categoriaId: catId });
     await actions.atualizarServico(novo.id, { nome: "Formulário", tipo: "html", htmlContent: "<html>v2</html>", url: null, imagemBase64: null, imagemUrl: null, categoriaId: catId, tags: [], favorito: false, status: "ativo" });
-    assert.equal(servidor.getAssets().get(`servico-html:${novo.id}`), "<html>v2</html>");
+    assert.equal(servidor.getAssets().get(`servico-conteudo:${novo.id}`), "<html>v2</html>");
   });
 
   test("eliminar um serviço HTML remove também o seu conteúdo do servidor", async () => {
@@ -170,14 +170,14 @@ describe("integração — conteúdo HTML em blob próprio (REGRESSÃO do limite
     const novo = await actions.criarServico({ nome: "Formulário", tipo: "html", htmlContent: "<html>x</html>", categoriaId: catId });
     await actions.removerServico(novo.id);
     await new Promise(r => setTimeout(r, 0)); // deixa o delete "fire-and-forget" terminar
-    assert.equal(servidor.getAssets().has(`servico-html:${novo.id}`), false);
+    assert.equal(servidor.getAssets().has(`servico-conteudo:${novo.id}`), false);
   });
 
   test("abrir um serviço HTML cujo conteúdo não está em memória vai buscá-lo ao blob (outro computador)", async () => {
     const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
     // simula um serviço já existente no servidor (criado por outro computador), tal como chega via GET /api/data
     servidor.getEstado().servicos.push({ id: "srv_outro", nome: "Vindo de outro PC", tipo: "html", categoriaId: "cat_geral", ordem: 0, favorito: false, status: "ativo", tags: [], contadorAcessos: 0 });
-    servidor.getAssets().set("servico-html:srv_outro", "<html>conteúdo remoto</html>");
+    servidor.getAssets().set("servico-conteudo:srv_outro", "<html>conteúdo remoto</html>");
     await actions.recarregarDoServidor();
 
     const servicoEmMemoria = store.getState().servicos.find(s => s.id === "srv_outro");
@@ -185,14 +185,14 @@ describe("integração — conteúdo HTML em blob próprio (REGRESSÃO do limite
 
     // window/Blob/URL não existem no Node — simulamos apenas a parte de obtenção do conteúdo
     const { makeDataStore } = await import("../src/db.js");
-    const conteudo = await makeDataStore().getAsset(`servico-html:${servicoEmMemoria.id}`);
+    const conteudo = await makeDataStore().getAsset(`servico-conteudo:${servicoEmMemoria.id}`);
     assert.equal(conteudo, "<html>conteúdo remoto</html>");
   });
 
   test("exportarDados inclui o htmlContent mesmo quando só existe no servidor (não em memória)", async () => {
     const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
     servidor.getEstado().servicos.push({ id: "srv_outro", nome: "Vindo de outro PC", tipo: "html", categoriaId: "cat_geral", ordem: 0, favorito: false, status: "ativo", tags: [], contadorAcessos: 0 });
-    servidor.getAssets().set("servico-html:srv_outro", "<html>conteúdo remoto</html>");
+    servidor.getAssets().set("servico-conteudo:srv_outro", "<html>conteúdo remoto</html>");
     await actions.recarregarDoServidor();
 
     // capta o Blob criado por exportarDados sem depender das APIs de DOM/URL do browser
@@ -218,11 +218,65 @@ describe("integração — conteúdo HTML em blob próprio (REGRESSÃO do limite
     const file = { text: async () => JSON.stringify(ficheiroImportado) };
     await actions.importarDados(file);
 
-    assert.equal(servidor.getAssets().get("servico-html:srv_importado"), "<html>importado</html>");
+    assert.equal(servidor.getAssets().get("servico-conteudo:srv_importado"), "<html>importado</html>");
     const noServidor = servidor.getEstado().servicos.find(s => s.id === "srv_importado");
     assert.equal(noServidor.htmlContent, undefined, "o payload principal não deve incluir o htmlContent importado");
     const emMemoria = store.getState().servicos.find(s => s.id === "srv_importado");
     assert.equal(emMemoria.htmlContent, "<html>importado</html>", "em memória, nesta sessão, o conteúdo fica disponível de imediato");
+  });
+});
+
+describe("integração — tipo 'arquivo' (PDF, Word, Excel, etc. — REGRESSÃO do pedido do utilizador)", () => {
+  const PDF_FAKE = "data:application/pdf;base64,JVBERi0xLjQKJcOkw7zDtsO4CjIgMCBvYmoK";
+
+  test("criar serviço 'arquivo' grava o conteúdo no blob próprio, nunca no payload de /api/data", async () => {
+    const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
+    const catId = store.getState().categorias[0].id;
+    const novo = await actions.criarServico({ nome: "Reserva PDF", tipo: "arquivo", arquivoBase64: PDF_FAKE, arquivoNome: "reserva.pdf", categoriaId: catId });
+    await actions.flushSync("t");
+
+    const noServidor = servidor.getEstado().servicos.find(s => s.id === novo.id);
+    assert.equal(noServidor.arquivoBase64, undefined, "o payload de /api/data nunca deve incluir arquivoBase64");
+    assert.equal(noServidor.arquivoNome, "reserva.pdf", "o nome do ficheiro (leve) pode continuar no índice");
+    assert.equal(servidor.getAssets().get(`servico-conteudo:${novo.id}`), PDF_FAKE);
+  });
+
+  test("editar um serviço 'arquivo' sem carregar novo ficheiro NÃO apaga o conteúdo existente", async () => {
+    const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
+    const catId = store.getState().categorias[0].id;
+    const novo = await actions.criarServico({ nome: "Reserva PDF", tipo: "arquivo", arquivoBase64: PDF_FAKE, arquivoNome: "reserva.pdf", categoriaId: catId });
+
+    await actions.atualizarServico(novo.id, { nome: "Reserva PDF Renomeada", descricao: "", tipo: "arquivo", url: null, imagemBase64: null, imagemUrl: null, categoriaId: catId, tags: [], favorito: false, status: "ativo" });
+
+    assert.equal(servidor.getAssets().get(`servico-conteudo:${novo.id}`), PDF_FAKE, "o conteúdo do ficheiro não pode ter sido apagado");
+    const atualizado = store.getState().servicos.find(s => s.id === novo.id);
+    assert.equal(atualizado.tipo, "arquivo", "o tipo tem de continuar 'arquivo'");
+    assert.equal(atualizado.arquivoNome, "reserva.pdf", "o nome do ficheiro original mantém-se");
+  });
+
+  test("eliminar um serviço 'arquivo' remove também o seu conteúdo do servidor", async () => {
+    const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
+    const catId = store.getState().categorias[0].id;
+    const novo = await actions.criarServico({ nome: "Reserva PDF", tipo: "arquivo", arquivoBase64: PDF_FAKE, categoriaId: catId });
+    await actions.removerServico(novo.id);
+    await new Promise(r => setTimeout(r, 0));
+    assert.equal(servidor.getAssets().has(`servico-conteudo:${novo.id}`), false);
+  });
+
+  test("exportarDados inclui o arquivoBase64 mesmo quando só existe no servidor", async () => {
+    const { store, actions, servidor } = await novoAmbiente({ servicos: [], categorias: CATEGORIAS_PADRAO, config: {} });
+    servidor.getEstado().servicos.push({ id: "srv_pdf", nome: "PDF de outro PC", tipo: "arquivo", arquivoNome: "x.pdf", categoriaId: "cat_geral", ordem: 0, favorito: false, status: "ativo", tags: [], contadorAcessos: 0 });
+    servidor.getAssets().set("servico-conteudo:srv_pdf", PDF_FAKE);
+    await actions.recarregarDoServidor();
+
+    let payloadExportado = null;
+    global.Blob = class { constructor(parts) { payloadExportado = JSON.parse(parts[0]); } };
+    global.URL.createObjectURL = () => "blob:fake";
+    global.document = { createElement: () => ({ click() {}, remove() {}, set href(v) {}, set download(v) {} }), body: { appendChild() {} } };
+    await actions.exportarDados();
+
+    const servicoExportado = payloadExportado.servicos.find(s => s.id === "srv_pdf");
+    assert.equal(servicoExportado.arquivoBase64, PDF_FAKE);
   });
 });
 

@@ -20,15 +20,29 @@ import { nowTs, uid } from "./utils.js";
 import { CATEGORIA_INDEFINIDA_ID, CATEGORIAS_PADRAO } from "./domain.js";
 
 function stripTransient(s) {
-  // `htmlContent` NUNCA vai no payload do estado geral: vive no seu próprio
-  // blob (ver `servico-html:<id>` via dataStore.setAsset/getAsset), para que
-  // o pedido de gravação do estado se mantenha sempre leve, por muitos ou
-  // grandes que sejam os documentos HTML já carregados. Ver `abrirEmNovaAba`
-  // para o fallback que vai buscar o conteúdo quando não está em memória.
-  const { blobUrl, htmlContent, ...rest } = s;
+  // `htmlContent`/`arquivoBase64` NUNCA vão no payload do estado geral: vivem
+  // no seu próprio blob (ver `chaveConteudoServico` via dataStore.setAsset/
+  // getAsset), para que o pedido de gravação do estado se mantenha sempre
+  // leve, por muitos ou grandes que sejam os documentos já carregados. Ver
+  // `abrirEmNovaAba` para o fallback que vai buscar o conteúdo quando não
+  // está em memória.
+  const { blobUrl, htmlContent, arquivoBase64, ...rest } = s;
   return rest;
 }
-function chaveHtmlServico(id) { return `servico-html:${id}`; }
+function chaveConteudoServico(id) { return `servico-conteudo:${id}`; }
+
+/** data:mime;base64,XXXX -> Blob binário, para abrir PDFs/imagens/documentos corretamente. */
+function dataUrlParaBlob(dataUrl) {
+  const virgula = dataUrl.indexOf(",");
+  const cabecalho = dataUrl.slice(0, virgula);
+  const base64 = dataUrl.slice(virgula + 1);
+  const mimeMatch = cabecalho.match(/data:(.*?)(;base64)?$/);
+  const mime = (mimeMatch && mimeMatch[1]) || "application/octet-stream";
+  const binario = atob(base64);
+  const bytes = new Uint8Array(binario.length);
+  for (let i = 0; i < binario.length; i++) bytes[i] = binario.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
 
 export function createActions(store, dataStore) {
   let syncTimer = null;
@@ -107,11 +121,14 @@ export function createActions(store, dataStore) {
     async criarServico(dados, onProgress) {
       const st = store.getState();
       const maxOrdem = st.servicos.reduce((m, s) => Math.max(m, s.ordem || 0), -1);
+      const conteudoParaGuardar = dados.tipo === "html" ? dados.htmlContent : dados.tipo === "arquivo" ? dados.arquivoBase64 : null;
       const novo = {
         id: uid("srv"),
         nome: dados.nome, descricao: dados.descricao || "",
         tipo: dados.tipo, url: dados.tipo === "url" ? dados.url : null,
         htmlContent: dados.tipo === "html" ? dados.htmlContent : null,
+        arquivoBase64: dados.tipo === "arquivo" ? dados.arquivoBase64 : null,
+        arquivoNome: dados.tipo === "arquivo" ? (dados.arquivoNome || null) : null,
         imagemBase64: dados.imagemBase64 || null, imagemUrl: dados.imagemUrl || null,
         categoriaId: dados.categoriaId || CATEGORIA_INDEFINIDA_ID,
         tags: dados.tags || [], favorito: !!dados.favorito, status: dados.status || "ativo",
@@ -119,12 +136,12 @@ export function createActions(store, dataStore) {
       };
       store.dispatch({ type: "ADD_SERVICO", servico: novo });
       scheduleSync("criar-servico");
-      if (novo.tipo === "html" && novo.htmlContent) {
+      if (conteudoParaGuardar) {
         try {
-          await dataStore.setAsset(chaveHtmlServico(novo.id), novo.htmlContent, onProgress);
+          await dataStore.setAsset(chaveConteudoServico(novo.id), conteudoParaGuardar, onProgress);
         } catch (err) {
-          console.error("Erro ao guardar o conteúdo HTML:", err);
-          bus.emit("toast:show", { type: "err", msg: `Serviço "${novo.nome}" criado, mas o ficheiro HTML não foi guardado no servidor: ${err.message}` });
+          console.error("Erro ao guardar o conteúdo do serviço:", err);
+          bus.emit("toast:show", { type: "err", msg: `Serviço "${novo.nome}" criado, mas o ficheiro não foi guardado no servidor: ${err.message}` });
           return novo;
         }
       }
@@ -136,15 +153,20 @@ export function createActions(store, dataStore) {
       store.dispatch({ type: "UPDATE_SERVICO", id, dados: { ...dados, atualizadoEm: nowTs() } });
       scheduleSync("atualizar-servico");
       const atualizado = store.getState().servicos.find(s => s.id === id);
-      // `dados.htmlContent` só vem preenchido quando o utilizador carregou um
-      // NOVO ficheiro nesta edição — se não veio, o conteúdo existente no
-      // servidor mantém-se intocado (não há nada para gravar aqui).
-      if (dados.tipo === "html" && typeof dados.htmlContent === "string" && dados.htmlContent) {
+      // `dados.htmlContent`/`dados.arquivoBase64` só vêm preenchidos quando o
+      // utilizador carregou um NOVO ficheiro nesta edição — se não vieram, o
+      // conteúdo existente no servidor mantém-se intocado (nada a gravar aqui).
+      const conteudoParaGuardar = dados.tipo === "html" && typeof dados.htmlContent === "string" && dados.htmlContent
+        ? dados.htmlContent
+        : dados.tipo === "arquivo" && typeof dados.arquivoBase64 === "string" && dados.arquivoBase64
+        ? dados.arquivoBase64
+        : null;
+      if (conteudoParaGuardar) {
         try {
-          await dataStore.setAsset(chaveHtmlServico(id), dados.htmlContent, onProgress);
+          await dataStore.setAsset(chaveConteudoServico(id), conteudoParaGuardar, onProgress);
         } catch (err) {
-          console.error("Erro ao guardar o conteúdo HTML:", err);
-          bus.emit("toast:show", { type: "err", msg: `Serviço "${atualizado?.nome || ""}" atualizado, mas o novo ficheiro HTML não foi guardado no servidor: ${err.message}` });
+          console.error("Erro ao guardar o conteúdo do serviço:", err);
+          bus.emit("toast:show", { type: "err", msg: `Serviço "${atualizado?.nome || ""}" atualizado, mas o novo ficheiro não foi guardado no servidor: ${err.message}` });
           return atualizado;
         }
       }
@@ -156,7 +178,7 @@ export function createActions(store, dataStore) {
       const alvo = store.getState().servicos.find(s => s.id === id);
       store.dispatch({ type: "REMOVE_SERVICO", id });
       scheduleSync("remover-servico");
-      if (alvo?.tipo === "html") dataStore.deleteAsset(chaveHtmlServico(id));
+      if (alvo?.tipo === "html" || alvo?.tipo === "arquivo") dataStore.deleteAsset(chaveConteudoServico(id));
       if (alvo) bus.emit("toast:show", { type: "warn", msg: `Serviço "${alvo.nome}" removido.` });
     },
 
@@ -176,13 +198,13 @@ export function createActions(store, dataStore) {
     },
 
     /**
-     * Abre o serviço numa nova aba. Para serviços HTML cujo conteúdo já está
-     * em memória (criados/editados nesta mesma sessão), abre de imediato.
-     * Caso contrário (carregado noutra sessão/computador, onde o estado
-     * geral nunca inclui o HTML completo), vai buscar o conteúdo ao seu blob
-     * próprio primeiro. Abre a aba em branco de imediato (dentro do mesmo
-     * gesto do utilizador) e só depois navega para o conteúdo, para não ser
-     * bloqueado como pop-up pelo browser.
+     * Abre o serviço numa nova aba. Para serviços HTML/ficheiro cujo
+     * conteúdo já está em memória (criados/editados nesta mesma sessão),
+     * abre de imediato. Caso contrário (carregado noutra sessão/computador,
+     * onde o estado geral nunca inclui o conteúdo completo), vai buscar o
+     * conteúdo ao seu blob próprio primeiro. Abre a aba em branco de
+     * imediato (dentro do mesmo gesto do utilizador) e só depois navega
+     * para o conteúdo, para não ser bloqueado como pop-up pelo browser.
      */
     abrirEmNovaAba(id) {
       const st = store.getState();
@@ -203,19 +225,26 @@ export function createActions(store, dataStore) {
         return;
       }
 
-      if (serv.tipo === "html") {
+      if (serv.tipo === "arquivo" && serv.arquivoBase64) {
+        const blob = dataUrlParaBlob(serv.arquivoBase64);
+        window.open(URL.createObjectURL(blob), "_blank");
+        actions.registarAcesso(id);
+        return;
+      }
+
+      if (serv.tipo === "html" || serv.tipo === "arquivo") {
         const janela = window.open("", "_blank");
-        dataStore.getAsset(chaveHtmlServico(id)).then(content => {
+        dataStore.getAsset(chaveConteudoServico(id)).then(content => {
           if (!content) {
             bus.emit("toast:show", { type: "err", msg: "Não foi possível encontrar o conteúdo deste serviço no servidor." });
             if (janela) janela.close();
             return;
           }
-          const blob = new Blob([content], { type: "text/html" });
+          const blob = serv.tipo === "html" ? new Blob([content], { type: "text/html" }) : dataUrlParaBlob(content);
           if (janela) janela.location.href = URL.createObjectURL(blob);
           actions.registarAcesso(id);
         }).catch(err => {
-          console.error("Erro ao carregar conteúdo HTML:", err);
+          console.error("Erro ao carregar conteúdo do serviço:", err);
           bus.emit("toast:show", { type: "err", msg: "Erro ao carregar o conteúdo deste serviço: " + err.message });
           if (janela) janela.close();
         });
@@ -255,13 +284,14 @@ export function createActions(store, dataStore) {
       try {
         servicosCompletos = await Promise.all(st.servicos.map(async (s) => {
           const limpo = stripTransient(s);
-          if (s.tipo === "html") {
-            let conteudo = s.htmlContent;
+          if (s.tipo === "html" || s.tipo === "arquivo") {
+            let conteudo = s.tipo === "html" ? s.htmlContent : s.arquivoBase64;
             if (!conteudo) {
-              try { conteudo = await dataStore.getAsset(chaveHtmlServico(s.id)); }
+              try { conteudo = await dataStore.getAsset(chaveConteudoServico(s.id)); }
               catch (err) { console.error(`Erro ao obter o conteúdo de "${s.nome}" para a exportação:`, err); }
             }
-            limpo.htmlContent = conteudo || null;
+            if (s.tipo === "html") limpo.htmlContent = conteudo || null;
+            else limpo.arquivoBase64 = conteudo || null;
           }
           return limpo;
         }));
@@ -290,15 +320,17 @@ export function createActions(store, dataStore) {
         const data = JSON.parse(text);
         if (!data || !Array.isArray(data.servicos)) throw new Error("Ficheiro inválido.");
 
-        // O conteúdo HTML de cada serviço vai para o seu próprio blob antes de
-        // gravar o estado geral — senão importar um backup com documentos
-        // grandes voltaria a ultrapassar o limite de tamanho do pedido.
+        // O conteúdo pesado de cada serviço (HTML ou ficheiro) vai para o seu
+        // próprio blob antes de gravar o estado geral — senão importar um
+        // backup com documentos grandes voltaria a ultrapassar o limite de
+        // tamanho do pedido.
         const servicosLeves = [];
         for (const s of data.servicos) {
-          const { htmlContent, ...leve } = s;
+          const { htmlContent, arquivoBase64, ...leve } = s;
           servicosLeves.push(leve);
-          if (s.tipo === "html" && htmlContent) {
-            try { await dataStore.setAsset(chaveHtmlServico(s.id), htmlContent); }
+          const conteudo = s.tipo === "html" ? htmlContent : s.tipo === "arquivo" ? arquivoBase64 : null;
+          if (conteudo) {
+            try { await dataStore.setAsset(chaveConteudoServico(s.id), conteudo); }
             catch (err) { console.error(`Erro ao importar o conteúdo de "${s.nome}":`, err); }
           }
         }
@@ -309,7 +341,7 @@ export function createActions(store, dataStore) {
           logoBase64: data.logoBase64 || store.getState().logoBase64,
           nomeFarmacia: data.nomeFarmacia || store.getState().nomeFarmacia
         };
-        // No estado em memória (esta sessão) mantemos o htmlContent completo,
+        // No estado em memória (esta sessão) mantemos o conteúdo completo,
         // para "abrir" funcionar de imediato sem precisar de ir já buscá-lo.
         store.dispatch({ type: "IMPORT_DADOS", payload: { ...payload, servicos: data.servicos } });
         await Promise.all([
